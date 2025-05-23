@@ -185,34 +185,7 @@
   (is-some (map-get? data-types { type-id: data-type }))
 )
 
-;; Check if a user has given consent for a specific data type
-(define-private (has-consent (user-id principal) (grantee-id principal) (data-type (string-utf8 30)))
-  (match (map-get? data-permissions { user-id: user-id, grantee-id: grantee-id, data-type: data-type })
-    permission (and 
-                 (< (get-block-time) (get expires-at permission))
-                 true
-               )
-    false
-  )
-)
 
-;; Validate a challenge exists and is active
-(define-private (is-valid-challenge (challenge-id uint))
-  (match (map-get? challenges { challenge-id: challenge-id })
-    challenge (and 
-                (get active challenge)
-                (< (get-block-time) (get end-time challenge))
-              )
-    false
-  )
-)
-
-;; Generate a unique hash for consent records
-(define-private (generate-consent-hash (user-id principal) (grantee-id principal) (timestamp uint))
-  (sha256 (concat (principal-to-buff user-id) 
-                 (concat (principal-to-buff grantee-id)
-                         (uint-to-buff timestamp))))
-)
 
 ;; ======================================
 ;; Read-Only Functions
@@ -223,23 +196,12 @@
   (map-get? users { user-id: user-id })
 )
 
-;; Get user's registered devices
-(define-read-only (get-user-devices (user-id principal))
-  (map-get? user-devices { user-id: user-id, device-id: "" })
-)
 
 ;; Get information about a specific data type
 (define-read-only (get-data-type-info (type-id (string-utf8 30)))
   (map-get? data-types { type-id: type-id })
 )
 
-;; Check if a user has granted permission for specific data
-(define-read-only (check-data-permission 
-                   (user-id principal) 
-                   (grantee-id principal) 
-                   (data-type (string-utf8 30)))
-  (has-consent user-id grantee-id data-type)
-)
 
 ;; Get details of an active challenge
 (define-read-only (get-challenge-details (challenge-id uint))
@@ -270,26 +232,6 @@
 ;; Public Functions
 ;; ======================================
 
-;; Register a new user in the Health Data Mesh
-(define-public (register-user (name (optional (string-utf8 50))) (profile-data-url (optional (string-utf8 256))))
-  (let ((user-id tx-sender))
-    (if (user-exists user-id)
-      ERR-USER-ALREADY-EXISTS
-      (begin
-        (map-set users
-          { user-id: user-id }
-          {
-            name: name,
-            profile-data-url: profile-data-url,
-            registration-time: (get-block-time),
-            active: true
-          }
-        )
-        (ok true)
-      )
-    )
-  )
-)
 
 ;; Update user profile information
 (define-public (update-profile (name (optional (string-utf8 50))) (profile-data-url (optional (string-utf8 256))))
@@ -344,47 +286,8 @@
   )
 )
 
-;; Register a new wearable device
-(define-public (register-device 
-                (device-id (string-utf8 64))
-                (device-type (string-utf8 50)))
-  (let ((user-id tx-sender))
-    (if (user-exists user-id)
-      (if (is-some (map-get? user-devices { user-id: user-id, device-id: device-id }))
-        ERR-DEVICE-ALREADY-REGISTERED
-        (begin
-          (map-set user-devices
-            { user-id: user-id, device-id: device-id }
-            {
-              device-type: device-type,
-              added-at: (get-block-time),
-              last-sync: (get-block-time),
-              active: true
-            }
-          )
-          (ok true)
-        )
-      )
-      ERR-USER-NOT-FOUND
-    )
-  )
-)
 
-;; Update device sync status
-(define-public (update-device-sync (device-id (string-utf8 64)))
-  (let ((user-id tx-sender))
-    (match (map-get? user-devices { user-id: user-id, device-id: device-id })
-      device (begin
-               (map-set user-devices
-                 { user-id: user-id, device-id: device-id }
-                 (merge device { last-sync: (get-block-time) })
-               )
-               (ok true)
-             )
-      ERR-DEVICE-NOT-FOUND
-    )
-  )
-)
+
 
 ;; Remove a device
 (define-public (remove-device (device-id (string-utf8 64)))
@@ -402,85 +305,7 @@
   )
 )
 
-;; Add a reference to health data stored off-chain
-(define-public (add-data-reference
-                (data-type (string-utf8 30))
-                (storage-url (string-utf8 256))
-                (encryption-key-id (string-utf8 64))
-                (data-hash (buff 32)))
-  (let ((user-id tx-sender)
-        (timestamp (get-block-time)))
-    (if (user-exists user-id)
-      (if (is-valid-data-type data-type)
-        (begin
-          (map-set data-storage-refs
-            { user-id: user-id, data-type: data-type, timestamp: timestamp }
-            {
-              storage-url: storage-url,
-              encryption-key-id: encryption-key-id,
-              hash: data-hash
-            }
-          )
-          (ok timestamp)
-        )
-        ERR-INVALID-DATA-TYPE
-      )
-      ERR-USER-NOT-FOUND
-    )
-  )
-)
 
-;; Grant permission to access specific data type
-(define-public (grant-data-permission
-                (grantee-id principal)
-                (data-type (string-utf8 30))
-                (duration uint)
-                (purpose (string-utf8 100)))
-  (let ((user-id tx-sender)
-        (current-time (get-block-time))
-        (expiration-time (+ (get-block-time) duration))
-        (consent-id (to-string (generate-consent-hash user-id grantee-id current-time))))
-    
-    (if (user-exists user-id)
-      (if (is-valid-data-type data-type)
-        (if (> duration u0)
-          (begin
-            ;; Set the data permission
-            (map-set data-permissions
-              { user-id: user-id, grantee-id: grantee-id, data-type: data-type }
-              {
-                granted-at: current-time,
-                expires-at: expiration-time,
-                purpose: purpose,
-                revocable: true,
-                access-count: u0
-              }
-            )
-            
-            ;; Record consent for audit trail
-            (map-set consent-records
-              { record-id: consent-id }
-              {
-                user-id: user-id,
-                grantee-id: grantee-id,
-                data-types: (list data-type),
-                granted-at: current-time,
-                expires-at: expiration-time,
-                purpose: purpose,
-                consent-proof: (generate-consent-hash user-id grantee-id current-time)
-              }
-            )
-            
-            (ok true)
-          )
-          ERR-INVALID-DURATION
-        )
-        ERR-INVALID-DATA-TYPE
-      )
-      ERR-USER-NOT-FOUND
-    )
-  )
-)
 
 ;; Revoke data access permission
 (define-public (revoke-data-permission
@@ -502,258 +327,7 @@
   )
 )
 
-;; Record data access by a grantee
-(define-public (record-data-access
-                (user-id principal)
-                (data-type (string-utf8 30)))
-  (let ((grantee-id tx-sender))
-    (match (map-get? data-permissions { user-id: user-id, grantee-id: grantee-id, data-type: data-type })
-      permission (if (< (get-block-time) (get expires-at permission))
-                   (begin
-                     (map-set data-permissions
-                       { user-id: user-id, grantee-id: grantee-id, data-type: data-type }
-                       (merge permission 
-                              { access-count: (+ (get access-count permission) u1) }
-                       )
-                     )
-                     (ok true)
-                   )
-                   ERR-ACCESS-DENIED
-                 )
-      ERR-CONSENT-NOT-GIVEN
-    )
-  )
-)
 
-;; Create a new community health challenge
-(define-public (create-health-challenge
-                (name (string-utf8 100))
-                (description (string-utf8 256))
-                (required-data-types (list 10 (string-utf8 30)))
-                (duration uint)
-                (goal-criteria (string-utf8 256))
-                (reward-amount uint)
-                (reward-token principal))
-  (let ((challenge-id (var-get next-challenge-id))
-        (start-time (get-block-time))
-        (end-time (+ start-time duration)))
-    
-    (if (is-contract-admin)
-      (begin
-        (map-set challenges
-          { challenge-id: challenge-id }
-          {
-            name: name,
-            description: description,
-            required-data-types: required-data-types,
-            start-time: start-time,
-            end-time: end-time,
-            goal-criteria: goal-criteria,
-            reward-amount: reward-amount,
-            reward-token: reward-token,
-            organizer: tx-sender,
-            active: true
-          }
-        )
-        
-        (var-set next-challenge-id (+ challenge-id u1))
-        (ok challenge-id)
-      )
-      ERR-NOT-AUTHORIZED
-    )
-  )
-)
-
-;; Join a community health challenge
-(define-public (join-challenge (challenge-id uint))
-  (let ((user-id tx-sender))
-    (if (user-exists user-id)
-      (if (is-valid-challenge challenge-id)
-        (if (is-some (map-get? challenge-participants { challenge-id: challenge-id, user-id: user-id }))
-          ERR-ALREADY-JOINED-CHALLENGE
-          (begin
-            (map-set challenge-participants
-              { challenge-id: challenge-id, user-id: user-id }
-              {
-                joined-at: (get-block-time),
-                goal-reached: false,
-                goal-reached-at: none,
-                reward-claimed: false
-              }
-            )
-            (ok true)
-          )
-        )
-        ERR-CHALLENGE-NOT-FOUND
-      )
-      ERR-USER-NOT-FOUND
-    )
-  )
-)
-
-;; Submit proof of achieving challenge goal
-(define-public (submit-challenge-completion (challenge-id uint))
-  (let ((user-id tx-sender)
-        (current-time (get-block-time)))
-    
-    (match (map-get? challenges { challenge-id: challenge-id })
-      challenge (if (< current-time (get end-time challenge))
-                  (match (map-get? challenge-participants { challenge-id: challenge-id, user-id: user-id })
-                    participant (if (not (get goal-reached participant))
-                                  (begin
-                                    (map-set challenge-participants
-                                      { challenge-id: challenge-id, user-id: user-id }
-                                      (merge participant 
-                                             { 
-                                               goal-reached: true,
-                                               goal-reached-at: (some current-time)
-                                             }
-                                      )
-                                    )
-                                    (ok true)
-                                  )
-                                  (ok true)
-                                )
-                    ERR-USER-NOT-FOUND
-                  )
-                  ERR-CHALLENGE-ENDED
-                )
-      ERR-CHALLENGE-NOT-FOUND
-    )
-  )
-)
-
-;; Claim reward for completing a challenge
-(define-public (claim-challenge-reward (challenge-id uint))
-  (let ((user-id tx-sender))
-    
-    (match (map-get? challenges { challenge-id: challenge-id })
-      challenge (match (map-get? challenge-participants { challenge-id: challenge-id, user-id: user-id })
-                  participant (if (and (get goal-reached participant)
-                                      (not (get reward-claimed participant)))
-                                (begin
-                                  ;; Update participant record to mark reward as claimed
-                                  (map-set challenge-participants
-                                    { challenge-id: challenge-id, user-id: user-id }
-                                    (merge participant { reward-claimed: true })
-                                  )
-                                  
-                                  ;; If this were a real contract, we would transfer tokens here
-                                  ;; For example: (contract-call? (get reward-token challenge) transfer 
-                                  ;;               (get reward-amount challenge) (get organizer challenge) user-id none)
-                                  
-                                  (ok true)
-                                )
-                                (err (if (get reward-claimed participant)
-                                       u113  ;; Already claimed
-                                       u114  ;; Goal not reached
-                                     ))
-                              )
-                  ERR-USER-NOT-FOUND
-                )
-      ERR-CHALLENGE-NOT-FOUND
-    )
-  )
-)
-
-;; Create a new research initiative
-(define-public (create-research-initiative
-                (name (string-utf8 100))
-                (description (string-utf8 256))
-                (required-data-types (list 10 (string-utf8 30)))
-                (duration uint)
-                (reward-per-contribution uint)
-                (reward-token principal))
-  (let ((initiative-id (var-get next-initiative-id))
-        (start-time (get-block-time))
-        (end-time (+ start-time duration)))
-    
-    (if (is-contract-admin)
-      (begin
-        (map-set research-initiatives
-          { initiative-id: initiative-id }
-          {
-            name: name,
-            description: description,
-            required-data-types: required-data-types,
-            organizer: tx-sender,
-            start-time: start-time,
-            end-time: end-time,
-            reward-per-contribution: reward-per-contribution,
-            reward-token: reward-token,
-            active: true
-          }
-        )
-        
-        (var-set next-initiative-id (+ initiative-id u1))
-        (ok initiative-id)
-      )
-      ERR-NOT-AUTHORIZED
-    )
-  )
-)
-
-;; Opt in to a research initiative
-(define-public (join-research (initiative-id uint))
-  (let ((user-id tx-sender))
-    (if (user-exists user-id)
-      (match (map-get? research-initiatives { initiative-id: initiative-id })
-        initiative (if (get active initiative)
-                     (if (< (get-block-time) (get end-time initiative))
-                       (begin
-                         (map-set research-contributors
-                           { initiative-id: initiative-id, user-id: user-id }
-                           {
-                             joined-at: (get-block-time),
-                             data-contributed: false,
-                             last-contribution: none,
-                             reward-claimed: false
-                           }
-                         )
-                         (ok true)
-                       )
-                       ERR-CHALLENGE-ENDED
-                     )
-                     ERR-CHALLENGE-NOT-FOUND
-                   )
-        ERR-CHALLENGE-NOT-FOUND
-      )
-      ERR-USER-NOT-FOUND
-    )
-  )
-)
-
-;; Submit anonymized data for research
-(define-public (contribute-research-data
-                (initiative-id uint)
-                (data-ref-hash (buff 32)))
-  (let ((user-id tx-sender)
-        (current-time (get-block-time)))
-    
-    (match (map-get? research-initiatives { initiative-id: initiative-id })
-      initiative (if (and (get active initiative)
-                         (< current-time (get end-time initiative)))
-                   (match (map-get? research-contributors { initiative-id: initiative-id, user-id: user-id })
-                     contributor (begin
-                                   (map-set research-contributors
-                                     { initiative-id: initiative-id, user-id: user-id }
-                                     (merge contributor 
-                                            { 
-                                              data-contributed: true,
-                                              last-contribution: (some current-time)
-                                            }
-                                     )
-                                   )
-                                   (ok true)
-                                 )
-                     ERR-USER-NOT-FOUND
-                   )
-                   ERR-CHALLENGE-ENDED
-                 )
-      ERR-CHALLENGE-NOT-FOUND
-    )
-  )
-)
 
 ;; Claim reward for research contribution
 (define-public (claim-research-reward (initiative-id uint))
